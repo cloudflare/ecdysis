@@ -3,8 +3,31 @@ on:
   push:
   pull_request:
     types: [opened, reopened, synchronize]
+  # allows running workflow from UI
+  workflow_dispatch:
 jobs:
+  skip-duplicate-jobs:
+    # Github actions is very eager to spawn jobs, and so it's very common for duplicate jobs to run concurrently.
+    # See, for instance:
+    # - https://github.com/orgs/community/discussions/57827
+    # - https://stackoverflow.com/questions/78422255/how-to-stop-pull-request-from-running-twice-with-a-twist
+    # - https://github.com/zopefoundation/meta/issues/145
+    # etc.
+    #
+    # https://github.com/marketplace/actions/skip-duplicate-actions fixes this.
+    runs-on: ubuntu-latest
+    outputs:
+      should_skip: ${{ steps.skip_check.outputs.should_skip }}  # variable that needs to be checked by skippable jobs
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: 'same_content_newer'
+          skip_after_successful_duplicate: 'true'
+
   build:
+    needs: skip-duplicate-jobs
+    if: needs.skip-duplicate-jobs.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -12,6 +35,8 @@ jobs:
       - name: Build ecdysis
         run: make build
   test:
+    needs: skip-duplicate-jobs
+    if: needs.skip-duplicate-jobs.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,6 +44,8 @@ jobs:
       - name: Run unit tests
         run: make tests
   integration-tests:
+    needs: skip-duplicate-jobs
+    if: needs.skip-duplicate-jobs.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
