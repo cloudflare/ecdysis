@@ -1,0 +1,27 @@
+name: Build and test Ecdysis
+on:
+  push:
+  pull_request:
+    types: [opened, reopened, synchronize]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build ecdysis
+        run: make build
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run unit tests
+        run: make tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run integration tests
+        run: make integration-tests
