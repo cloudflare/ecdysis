@@ -13,11 +13,7 @@ readme = "README.md"
 pre-release-commit-message = "Release {{version}}"
 tag-prefix = ""
 publish = false
-pre-release-hook = [
-    "git-cliff",
-    "-o", "RELEASE_NOTES",
-    "--tag", "{{version}}"
-]
+pre-release-hook = ["git-cliff", "-o", "RELEASE_NOTES", "--tag", "{{version}}"]
 
 [features]
 default = ["tokio_ecdysis"]
