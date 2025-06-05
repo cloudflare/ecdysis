@@ -1,0 +1,30 @@
+services:
+  test:
+    container_name: ecdysis-test
+    init: true  # this is crucial for child processes to not become zombies
+    build:
+      context: ../
+      dockerfile: integration_tests/Dockerfile
+    # If you are a Cloudflare employee, you probably do your ecdysis development work on a machine protected by WARP.
+    # Unfortunately, WARP doesn't always play nice with non-Cloudflare Docker images. Fortunately, there are ways around
+    # this. The below command will install the necessary root certificate in the Docker container by mounting it from
+    # the host, and it only requires prefixing the `docker compose` call with the path to the WARP cert directory:
+    #
+    # ```bash
+    # $ CF_CERTS=~/.local/share/cloudflare-warp-certs docker compose up
+    # ```
+    #
+    # If you are not a Clouflare employee, or you're simply not developing from a WARP-protected machine, you can ignore
+    # this environment variable. By default, `docker compose` will mount /dev/null in place of the certificate directory
+    # and the first two commands below will fail silently.
+    command: >-
+      bash -c
+      "(cp /opt/cf/CloudflareRootCertificate.pem /usr/local/share/ca-certificates/CloudflareRootCertificate.crt || true)
+      && (chmod 0644 /usr/local/share/ca-certificates/CloudflareRootCertificate.crt || true)
+      && /usr/sbin/update-ca-certificates
+      && cargo build --example tokio_echo --features \"tokio_ecdysis systemd_sockets\" --release
+      && cd integration_tests
+      && RUST_BACKTRACE=full cargo test -- --nocapture"
+    volumes:
+      - "${CF_CERTS:-/dev/null}:/opt/cf"
+

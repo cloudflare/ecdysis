@@ -1,0 +1,11 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+authors = ["Argo Smart Routing & Orpheus Team at Cloudflare, Inc."]
+edition = "2021"
+
+[dev-dependencies]
+nix = "0.26"
+regex = "1.10.4"
+serial_test = "3.1.0"
+tokio = { version = "1.37.0", features = ["full"] }

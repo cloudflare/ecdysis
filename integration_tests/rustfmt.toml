@@ -1,0 +1,7 @@
+# unstable features require nighly rustfmt
+# rustup toolchain add nightly && rustup component add rustfmt --toolchain nightly
+
+# group imports can't differentiate between our own crates and 3rd party ones, so skip for now
+##group_imports = "StdExternalCrate" # group imports by standard libraries, external crates, then super/crate, etc.
+
+imports_granularity = "Crate" # use nested import formatting (i.e. crate::{module1::{a, b}, module2}})
