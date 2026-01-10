@@ -10,10 +10,11 @@ exclude = ["integration_tests"]
 readme = "README.md"
 
 [package.metadata.release]
+# Settings for cargo release
 pre-release-commit-message = "Release {{version}}"
-tag-prefix = ""
-publish = false
 pre-release-hook = ["git-cliff", "-o", "RELEASE_NOTES", "--tag", "{{version}}"]
+publish = false  # don't publish automatically
+push = false  # don't push to the repo automatically
 
 [features]
 default = ["tokio_ecdysis"]
@@ -25,8 +26,8 @@ tokio_ecdysis = ["dep:futures", "dep:tokio", "dep:tokio-stream"]
 [dependencies]
 bincode = "1.3.3"
 bytes = "1.6.0"
-derive_more = { version = "1.0.0", features = ["from", "display"] }
-futures = { version = "0.3", optional = true, features = ["alloc"] }
+derive_more = { version = "1.0.0", features = ["display", "from"] }
+futures = { version = "0.3", features = ["alloc"], optional = true }
 log = "0.4"
 nix = "0.26"
 os_pipe = "1.1.5"
@@ -34,18 +35,22 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 socket2 = "0.5"
 tempfile = "3.10.1"
-tokio = { version = "1.37.0", optional = true, features = ["signal", "macros", "net", "fs"] }
-tokio-stream = { version = "0.1", optional = true, features = ["net", "signal", "sync"] }
-tokio-util = { version = "0.7", features = ["net", "codec"] }
+tokio = { version = "1.37.0", features = ["fs", "macros", "net", "signal"], optional = true }
+tokio-stream = { version = "0.1", features = ["net", "signal", "sync"], optional = true }
+tokio-util = { version = "0.7", features = ["codec", "net"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-seqpacket = "0.7"
 
 [dev-dependencies]
 env_logger = "0.11"
-tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1.37.0", features = [
+  "io-util",
+  "macros",
+  "rt-multi-thread"
+] }
 waitgroup = "0.1"
 
 [[example]]
 name = "tokio_echo"
-required-features = ["tokio_ecdysis", "systemd_sockets"]
+required-features = ["systemd_sockets", "tokio_ecdysis"]
