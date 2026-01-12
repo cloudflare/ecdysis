@@ -58,9 +58,9 @@ impl Stream for Trigger {
                 None => Poll::Ready(Some(Err(io::Error::other(
                     "Socket shut down unexpectedly.",
                 )))),
-                Some(Err(e)) => Poll::Ready(Some(Err(io::Error::other(
-                    format!("Unexpected error accepting connection on socket: {e}"),
-                )))),
+                Some(Err(e)) => Poll::Ready(Some(Err(io::Error::other(format!(
+                    "Unexpected error accepting connection on socket: {e}"
+                ))))),
                 Some(Ok(stream)) => {
                     Poll::Ready(Some(Ok(TriggerReason::UnixStream(path.clone(), stream))))
                 }
