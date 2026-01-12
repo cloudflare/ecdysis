@@ -1,0 +1,11 @@
+
+1.0.0
+- 2026-01-12 chore(style): cargo fmt
+- 2026-01-12 chore(clippy): fix clippy lints
+- 2026-01-10 chore: prepare for v1.0.0
+- 2025-06-05 feat: don't run duplicate jobs on PRs
+- 2025-06-05 feat: Github CI pipeline to build and test ecdysis
+- 2025-06-05 fix: cargo-sort lint
+- 2025-06-05 feat: initial public ecdysis commit
+
+
