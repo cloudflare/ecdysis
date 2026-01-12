@@ -55,12 +55,10 @@ impl Stream for Trigger {
                 Some(()) => Poll::Ready(Some(Ok(TriggerReason::Signal(*kind)))),
             },
             Self::Uds(path, listener_stream) => match ready!(listener_stream.poll_next_unpin(cx)) {
-                None => Poll::Ready(Some(Err(io::Error::new(
-                    io::ErrorKind::Other,
+                None => Poll::Ready(Some(Err(io::Error::other(
                     "Socket shut down unexpectedly.",
                 )))),
-                Some(Err(e)) => Poll::Ready(Some(Err(io::Error::new(
-                    io::ErrorKind::Other,
+                Some(Err(e)) => Poll::Ready(Some(Err(io::Error::other(
                     format!("Unexpected error accepting connection on socket: {e}"),
                 )))),
                 Some(Ok(stream)) => {
