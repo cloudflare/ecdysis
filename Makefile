@@ -75,15 +75,19 @@ install-release-reqs:
 # To create a release, use release-<version type> (patch, minor, or major; e.g make release-patch for a
 # patch release). By default this only performs a dry run; to actually create a release specify EXECUTE 
 # = true: make EXECUTE=true release. Once the release has been created, it can be pushed to crates.io 
-# with push-release: make push-release (also a dry run by default).
+# with publish-release: make publish-release (also a dry run by default).
 #
 # NOTE for Cloudflare employees: Warp causes issues when creating a release for crates.io, so make sure
 # to disable it temporarily when doing this.
-.PHONY: release-% push-release
+.PHONY: release-% publish-release
 release-%: EXECUTE ?= false
 release-%: install-release-reqs
-	$(CARGO) release $(if $(filter true,$(EXECUTE)),-x) --no-push $*
+	$(CARGO) release $(if $(filter true,$(EXECUTE)),-x) --no-push --no-publish $*
 
-push-release: EXECUTE ?= false
-push-release:
-	$(CARGO) release push $(if $(filter true,$(EXECUTE)),-x)
+# push-release pushes release commits and tags to the git remote
+push-release: install-release-reqs
+	$(CARGO) release push -x
+
+publish-release: EXECUTE ?= false
+publish-release: install-release-reqs
+	$(CARGO) release publish $(if $(filter true,$(EXECUTE)),-x)

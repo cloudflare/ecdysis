@@ -13,8 +13,6 @@ readme = "README.md"
 # Settings for cargo release
 pre-release-commit-message = "Release {{version}}"
 pre-release-hook = ["git-cliff", "-o", "RELEASE_NOTES", "--tag", "{{version}}"]
-publish = false  # don't publish automatically
-push = false  # don't push to the repo automatically
 
 [features]
 default = ["tokio_ecdysis"]
