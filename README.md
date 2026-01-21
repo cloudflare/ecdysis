@@ -1,5 +1,7 @@
 # ecdysis
 
+[![Crates.io](https://img.shields.io/crates/v/ecdysis.svg)](https://crates.io/crates/ecdysis) [![Documentation](https://docs.rs/ecdysis/badge.svg)](https://docs.rs/ecdysis) [![License](https://img.shields.io/crates/l/ecdysis.svg)](https://github.com/cloudflare/ecdysis/blob/main/LICENSE) [![Rust 2021](https://img.shields.io/badge/rust-2021-blue.svg)](https://www.rust-lang.org)
+
 _Graceful restarts in Rust_
 
 ---
