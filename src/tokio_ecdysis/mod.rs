@@ -327,6 +327,9 @@ impl TokioEcdysis {
         P: AsRef<Path> + std::fmt::Debug,
     {
         let listener = self.inner.listen_unix(path)?;
+        // Note that removing this line will cause tokio to panic, as creating blocking sockets
+        // isn't allowed by default. See github.com/tokio-rs/tokio/issues/7172 for details.
+        listener.set_nonblocking(true)?;
         let listener = UnixListener::from_std(listener)?;
         let listener = UnixListenerStream::new(listener);
         Ok(self
