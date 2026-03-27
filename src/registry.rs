@@ -80,6 +80,14 @@ impl ListenerRegistry {
         }
     }
 
+    pub(crate) fn inherited_count(&self, sock_info: &SockInfo) -> usize {
+        let fds = self
+            .inherited_fds
+            .lock()
+            .expect("Cannot take lock on FdRegistry");
+        fds.iter().filter(|li| &li.sock_info == sock_info).count()
+    }
+
     pub(crate) fn add(&self, mut item: ListenerInfo) -> Result<(), io::Error> {
         let mut fds = self
             .used_fds

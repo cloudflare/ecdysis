@@ -303,6 +303,22 @@ impl Ecdysis {
         Ok(socket)
     }
 
+    /// Returns the number of inherited UDP sockets for `addr` that have not yet been consumed
+    /// by [`build_socket_udp`] or [`take_socket_udp`].
+    pub fn inherited_count_udp(&self, addr: SocketAddr) -> usize {
+        self.registry.inherited_count(&SockInfo::Udp(addr))
+    }
+
+    /// Take a UDP socket for `addr` from the parent's inherited set, if one exists. Unlike
+    /// [`build_socket_udp`], this does not create a new socket if none is inherited, and does not
+    /// re-register the socket for the next child. This is useful for draining excess sockets when
+    /// reducing the socket count during a graceful upgrade.
+    pub fn take_socket_udp(&self, addr: SocketAddr) -> Option<UdpSocket> {
+        self.registry
+            .take(&SockInfo::Udp(addr))
+            .map(|fd| unsafe { UdpSocket::from_raw_fd(fd) })
+    }
+
     /// This can be used to form a chain of `UnixDatagram` pairs between successive upgrades. The
     /// first `UnixDatagram` is one that the parent process has the other end to (of the same given
     /// name), if this is an upgrade and the parent process created a `UnixDatagram` with the same
