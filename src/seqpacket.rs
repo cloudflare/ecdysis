@@ -12,6 +12,9 @@ use crate::{
     registry::{ListenerInfo, SockInfo},
 };
 
+#[cfg(feature = "systemd_sockets")]
+use crate::listener::TryFromRawFd;
+
 impl Listener for UnixSeqpacketListener {
     fn info(&self) -> io::Result<ListenerInfo> {
         let sockaddr = self.local_addr()?;
@@ -19,6 +22,16 @@ impl Listener for UnixSeqpacketListener {
             fd: self.as_raw_fd(),
             sock_info: SockInfo::UnixSeqpacket(Some(sockaddr)),
         })
+    }
+}
+
+#[cfg(feature = "systemd_sockets")]
+impl TryFromRawFd for UnixSeqpacketListener {
+    unsafe fn try_from_raw_fd(fd: std::os::unix::prelude::RawFd) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Self::from_raw_fd(fd)
     }
 }
 

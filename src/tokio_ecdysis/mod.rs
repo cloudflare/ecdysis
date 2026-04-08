@@ -18,10 +18,13 @@ pub(super) mod systemd_sockets;
 
 #[cfg(feature = "systemd_sockets")]
 use {
-    crate::registry::SockInfo,
-    std::os::fd::FromRawFd,
+    crate::{listener::TryFromRawFd, registry::SockInfo},
     systemd_sockets::{SystemdSocketError, SystemdSockets, SystemdSocketsReadError},
 };
+
+#[cfg(target_os = "linux")]
+#[cfg(feature = "systemd_sockets")]
+use tokio_seqpacket::UnixSeqpacketListener;
 
 use bytes::Bytes;
 use futures::{stream::SplitStream, StreamExt};
@@ -488,7 +491,7 @@ impl TokioEcdysis {
         sock_info: SockInfo,
     ) -> Result<P, SystemdSocketError>
     where
-        P: FromRawFd + crate::listener::Listener,
+        P: TryFromRawFd + crate::listener::Listener,
     {
         if self.is_child() {
             return self.read_sock_from_registry_of_proto(sock_info);
@@ -505,7 +508,7 @@ impl TokioEcdysis {
             }
             Some(s) => {
                 let fd = s.find(name).await?;
-                unsafe { P::from_raw_fd(fd) }
+                unsafe { P::try_from_raw_fd(fd)? }
             }
         };
 
@@ -527,7 +530,7 @@ impl TokioEcdysis {
         sock_info: SockInfo,
     ) -> Result<P, SystemdSocketError>
     where
-        P: FromRawFd + crate::listener::Listener,
+        P: TryFromRawFd + crate::listener::Listener,
     {
         log::debug!(
             "child: find systemd sock with SockInfo {:?} in registry",
@@ -538,7 +541,7 @@ impl TokioEcdysis {
         match self.inner.registry.inherit(sock_info.clone()) {
             Some(fd) => {
                 log::debug!("Found existing fd in registry");
-                let sock = unsafe { P::from_raw_fd(fd) };
+                let sock = unsafe { P::try_from_raw_fd(fd)? };
                 Ok(sock)
             }
             None => {
@@ -553,6 +556,9 @@ impl TokioEcdysis {
 
     /// Find the Unix listen with `name` from the sockets passed from systemd.
     /// The function will check that the unix socket is bound to `path`.
+    ///
+    /// This function expects a SOCK_STREAM socket,
+    /// use `systemd_listen_unix_seqpacket` for SOCK_SEQPACKET sockets.
     ///
     /// **Unlike other listen_ functions, this function will never create the socket.**
     ///
@@ -586,6 +592,34 @@ impl TokioEcdysis {
             .supervisor
             .read()
             .supervise_stream(listener, stop_on_shutdown))
+    }
+
+    /// Find the Unix listen with `name` from the sockets passed from systemd.
+    /// The function will check that the unix socket is bound to `path`.
+    ///
+    /// This function works like `systemd_listen_unix` but expects a SOCK_SEQPACKET socket.
+    #[cfg(target_os = "linux")]
+    #[cfg(feature = "systemd_sockets")]
+    pub async fn systemd_listen_unix_seqpacket<P>(
+        &self,
+        stop_on_shutdown: StopOnShutdown,
+        name: String,
+        path: P,
+    ) -> Result<StoppableStream<UnixSeqpacketListenerStream>, SystemdSocketError>
+    where
+        P: AsRef<Path> + std::fmt::Debug,
+    {
+        let listener: UnixSeqpacketListener = self
+            .systemd_sock_of_proto(name, SockInfo::UnixSeqpacket(Some(path.as_ref().into())))
+            .await?;
+        // tokio-seqpacket sets O_NONBLOCK for us when we start accepting connections,
+        // so no need to set the nonblocking flag here.
+        // (see tokio_seqpacket::sys::accept)
+        let stream = UnixSeqpacketListenerStream::new(listener);
+        Ok(self
+            .supervisor
+            .read()
+            .supervise_stream(stream, stop_on_shutdown))
     }
 
     /// Find the TCP listen socket with `addr` from the sockets passed from systemd.
