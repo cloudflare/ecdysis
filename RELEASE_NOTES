@@ -1,5 +1,9 @@
 
+1.1.0
+- 2026-04-08 Add support for systemd-managed Unix SEQPACKET sockets
+
 1.0.1
+- 2026-02-10 Release 1.0.1
 - 2026-02-10 fix: make unix socket non-blocking
 - 2026-01-21 chore: add badges to README
 - 2026-01-20 fix: release procedure
