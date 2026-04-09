@@ -27,7 +27,7 @@ use std::{
 use socket2::Socket;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "tokio_ecdysis")]
-pub use tokio_seqpacket::UnixSeqpacketListener;
+pub use {crate::seqpacket::UnixSeqpacketListenerStream, tokio_seqpacket::UnixSeqpacketListener};
 
 use executioner::{upgrade, UpgradeFinished};
 use inheriter::{init_child, InheritError};
