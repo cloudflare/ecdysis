@@ -1,12 +1,12 @@
 use std::{
     io,
     net::{TcpListener, UdpSocket},
-    os::{
-        fd::{FromRawFd, RawFd},
-        unix::{io::AsRawFd, net::UnixListener},
-    },
+    os::unix::{io::AsRawFd, net::UnixListener},
     path::PathBuf,
 };
+
+#[cfg(feature = "systemd_sockets")]
+use std::os::fd::{FromRawFd, RawFd};
 
 use crate::registry::{ListenerInfo, SockInfo};
 

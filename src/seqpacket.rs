@@ -4,7 +4,11 @@ use std::{
     task::{Context, Poll},
 };
 
+#[cfg(feature = "systemd_sockets")]
+use std::os::fd::RawFd;
+
 use futures::Stream;
+
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
 
 use crate::{
@@ -27,7 +31,7 @@ impl Listener for UnixSeqpacketListener {
 
 #[cfg(feature = "systemd_sockets")]
 impl TryFromRawFd for UnixSeqpacketListener {
-    unsafe fn try_from_raw_fd(fd: std::os::unix::prelude::RawFd) -> io::Result<Self>
+    unsafe fn try_from_raw_fd(fd: RawFd) -> io::Result<Self>
     where
         Self: Sized,
     {
@@ -49,4 +53,19 @@ impl Stream for UnixSeqpacketListenerStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut().0.poll_accept(cx).map(Some)
     }
+}
+
+/// Set or unset nonblocking flag on socket file descriptor.
+///
+/// UnixSeqpacketListener does not provide a set_nonblocking method, so we
+/// implement one here.
+#[cfg(feature = "systemd_sockets")]
+pub fn set_nonblocking(fd: RawFd, nonblocking: bool) -> io::Result<()> {
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+
+    let mut oflags = OFlag::from_bits(fcntl(fd, FcntlArg::F_GETFL)?)
+        .ok_or(io::Error::other("fcntl F_GETFL returned invalid flags"))?;
+    oflags.set(OFlag::O_NONBLOCK, nonblocking);
+    fcntl(fd, FcntlArg::F_SETFL(oflags))?;
+    Ok(())
 }

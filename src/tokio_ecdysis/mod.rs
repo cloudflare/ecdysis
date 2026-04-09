@@ -612,9 +612,7 @@ impl TokioEcdysis {
         let listener: UnixSeqpacketListener = self
             .systemd_sock_of_proto(name, SockInfo::UnixSeqpacket(Some(path.as_ref().into())))
             .await?;
-        // tokio-seqpacket sets O_NONBLOCK for us when we start accepting connections,
-        // so no need to set the nonblocking flag here.
-        // (see tokio_seqpacket::sys::accept)
+        crate::seqpacket::set_nonblocking(listener.as_raw_fd(), true)?;
         let stream = UnixSeqpacketListenerStream::new(listener);
         Ok(self
             .supervisor
