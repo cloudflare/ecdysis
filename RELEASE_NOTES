@@ -1,5 +1,11 @@
 
+1.1.1
+- 2026-04-10 Fix Cargo.toml formatting
+- 2026-04-09 Set O_NONBLOCK on seqpacket listen socket
+- 2026-04-09 Export UnixSeqpacketListenerStream
+
 1.1.0
+- 2026-04-09 Release 1.1.0
 - 2026-04-08 Add support for systemd-managed Unix SEQPACKET sockets
 
 1.0.1
