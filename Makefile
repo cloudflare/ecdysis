@@ -5,7 +5,10 @@ build:
 	$(CARGO) build 
 
 .PHONY: tests
-tests: fmt-check clippy clippy-tests test doc-private
+tests: lint test doc-private
+
+.PHONY: lint
+lint: fmt-check clippy clippy-tests
 
 .PHONY: install-cargo-tools
 install-cargo-tools:
@@ -20,6 +23,7 @@ fmt-check: install-cargo-tools
 .PHONY: clippy
 clippy: install-cargo-tools
 	$(CARGO) clippy -- \
+		--deny warnings \
 		--deny clippy::all \
 		--deny clippy::todo \
 		--deny clippy::unimplemented \
