@@ -14,6 +14,8 @@ _Graceful restarts in Rust_
 
 ---
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 The `ecdysis` library is based on the [go library called tableflip](https://github.com/cloudflare/tableflip).
 
 It is sometimes useful to update the running code and / or configuration of a network service, without disrupting existing connections. Usually, this is achieved by starting a new process, somehow transferring clients to it and then exiting the old process.
