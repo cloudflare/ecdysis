@@ -71,6 +71,10 @@ In contrast, `ecdysis` specializes in socket inheritance and rebinding, making i
 
 In summary, `shellflip` is a more user-friendly solution for arbitrary data sharing in `systemd` environments, while `ecdysis` shines when socket inheritance and rebinding are prioritized.
 
+# Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history (Keep a Changelog).
+
 # Contributing
 
 Contributing to `ecdysis` is welcome and encouraged. We appreciate contributions in various forms, including bug reports, feature requests, and pull requests. To ensure that contributions are useful and effective, we have established guidelines that contributors should follow.
