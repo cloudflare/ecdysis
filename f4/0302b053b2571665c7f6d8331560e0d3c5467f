@@ -1,0 +1,29 @@
+src/executioner.rs
+  s_87ea371000417d::t_b15bc434e3bf13 23-28,30,44-77,302-367
+src/tokio_ecdysis/mod.rs
+  s_e853c2e5318a07::t_668bcad67fbb42 41,88-91,95,123,222-258,293,305,701,707-714,881,893
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f40302b053b2571665c7f6d8331560e0d3c5467f",
+  "prompts": {},
+  "sessions": {
+    "s_87ea371000417d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_00d0f6a15ffeik3XoGauzn0AjL",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Braden Ehrat <braden@cloudflare.com>"
+    },
+    "s_e853c2e5318a07": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_00d04be6affeA8FPDvJQ413cQi",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Braden Ehrat <braden@cloudflare.com>"
+    }
+  }
+}
