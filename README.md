@@ -54,6 +54,19 @@ Failing to meet these requirements will cause `ecdysis` to fail to initialize.
 
 [^2]: See the following _manpages_ for context on `systemd` named sockets: [`systemd.socket`](https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html), and [`sd_listen_fds`](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html).
 
+### Observing failed upgrades
+
+"Crashing during initialisation is OK" means that when an upgrade fails, the parent keeps its
+listening sockets, returns to the listening state, and retries on the next trigger. The upgrade
+future returned by `TokioEcdysisBuilder::ready()` therefore does _not_ resolve on a failed
+upgrade, and an application that only inspects that future cannot tell a healthy process from
+one whose every upgrade attempt has failed.
+
+Register `TokioEcdysisBuilder::on_upgrade_failure()` to observe these failures — typically to
+increment a counter and alert on it. `UpgradeError::reason()` gives a bounded string suitable
+for use as a metric label, while the `Display` representation carries the full detail for a log
+line. Applications driving `Ecdysis::upgrade()` directly get the same `UpgradeError` as its
+return value.
 
 ## Limitations
 

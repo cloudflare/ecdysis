@@ -94,6 +94,11 @@ async fn main() {
         .partial_stop_on_socket("/tmp/ecdysis_partial_exit.sock")
         .unwrap();
     ecdysis_builder.set_pid_file("./pidfile");
+    ecdysis_builder.on_upgrade_failure(|error| {
+        // A real application would increment a counter labelled with `error.reason()` here and
+        // alert on it; a failed upgrade is otherwise invisible outside of these logs.
+        log::error!("Upgrade failed (reason: {}): {error}", error.reason());
+    });
     #[cfg(feature = "systemd_notify")]
     if let Err(err) = ecdysis_builder.enable_systemd_notifications() {
         log::info!("Failed to enable systemd notifications: {err}");

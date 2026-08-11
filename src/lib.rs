@@ -29,12 +29,16 @@ use socket2::Socket;
 #[cfg(feature = "tokio_ecdysis")]
 pub use tokio_seqpacket::UnixSeqpacketListener;
 
-use executioner::{upgrade, UpgradeFinished};
+use executioner::upgrade;
 use inheriter::{init_child, InheritError};
 use registry::{ListenerRegistry, SockInfo};
 
 // reexports
-pub use crate::{listener::Listener, registry::ListenerInfo};
+pub use crate::{
+    executioner::{UpgradeError, UpgradeFinished},
+    listener::Listener,
+    registry::ListenerInfo,
+};
 #[cfg(feature = "systemd_notify")]
 pub use tokio_ecdysis::systemd_notify::{SystemdNotifier, SystemdNotifierError};
 

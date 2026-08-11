@@ -20,8 +20,14 @@ use crate::{
 
 pub type UpgradeFinished = Result<(), UpgradeError>;
 
-#[derive(derive_more::From, derive_more::Display)]
+/// The reason an upgrade attempt did not result in a ready child process.
+///
+/// Most of these are recoverable: the parent keeps its listening sockets, returns to the
+/// listening state, and retries on the next upgrade trigger. See
+/// [`crate::tokio_ecdysis::TokioEcdysisBuilder::on_upgrade_failure`] for observing them.
+#[derive(Debug, derive_more::From, derive_more::Display)]
 #[display("{_variant}")]
+#[non_exhaustive]
 pub enum UpgradeError {
     #[display("child exited unexpectedly")]
     ChildExit,
@@ -35,6 +41,54 @@ pub enum UpgradeError {
     #[display("serialization error: {:?}", _0)]
     #[from]
     SerializationError(bincode::Error), //TODO: grr, figure out bincode error
+
+    /// A failure in the upgrade machinery itself rather than in the child process lifecycle,
+    /// such as failing to notify systemd or failing to receive the result of the upgrade.
+    /// Unlike the other variants this is *not* recoverable; Ecdysis gives up on the upgrade and
+    /// resolves its future with an error.
+    #[display("internal error: {}", _0)]
+    Internal(String),
+}
+
+impl UpgradeError {
+    /// Every value [`UpgradeError::reason`] can currently return.
+    ///
+    /// Useful for zero-initializing a metric labelled by reason, so that alerting rules do not
+    /// have to cope with a missing series before the first failure occurs. Because
+    /// [`UpgradeError`] is `non_exhaustive`, treat this as the set of reasons known at compile
+    /// time rather than an exhaustive set for all time.
+    pub const REASONS: &'static [&'static str] = &[
+        "child_exit",
+        "child_timeout",
+        "not_started",
+        "serialization_error",
+        "internal",
+    ];
+
+    /// A stable, low-cardinality identifier for the kind of failure, suitable for use as a
+    /// metric label.
+    ///
+    /// Prefer this over the `Display` representation for labels: the `NotStarted`,
+    /// `SerializationError`, and `Internal` variants all carry unbounded detail that would
+    /// otherwise blow up label cardinality.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::ChildExit => "child_exit",
+            Self::ChildTimeout => "child_timeout",
+            Self::NotStarted(_) => "not_started",
+            Self::SerializationError(_) => "serialization_error",
+            Self::Internal(_) => "internal",
+        }
+    }
+}
+
+impl std::error::Error for UpgradeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SerializationError(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 pub fn upgrade(fds: Vec<ListenerInfo>) -> UpgradeFinished {
@@ -258,4 +312,81 @@ fn ready_pipes() -> Result<(os_pipe::PipeReader, i32), UpgradeError> {
     let send_ready_fd = clone_fd(send_ready.as_raw_fd())?;
     unset_cloexec(send_ready_fd);
     Ok((recv_ready, send_ready_fd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`UpgradeError::reason`] is a public contract: applications use it as a metric label and
+    /// alert on specific values, so the strings must stay stable and low-cardinality.
+    #[test]
+    fn test_upgrade_error_reason_is_stable_and_bounded() {
+        let cases = [
+            (UpgradeError::ChildExit, "child_exit"),
+            (UpgradeError::ChildTimeout, "child_timeout"),
+            (
+                UpgradeError::NotStarted("spawn: ENOMEM".into()),
+                "not_started",
+            ),
+            (
+                UpgradeError::SerializationError(Box::new(bincode::ErrorKind::SizeLimit)),
+                "serialization_error",
+            ),
+            (
+                UpgradeError::Internal("systemd went away".into()),
+                "internal",
+            ),
+        ];
+
+        for (error, expected) in &cases {
+            assert_eq!(error.reason(), *expected);
+            // The payload-carrying variants must not leak their unbounded detail into the label.
+            assert!(!error.reason().contains(' '));
+        }
+
+        // REASONS is what applications zero-initialize their metrics from, so it must stay in
+        // sync with reason() as variants are added.
+        assert_eq!(cases.len(), UpgradeError::REASONS.len());
+        for (error, _) in &cases {
+            assert!(
+                UpgradeError::REASONS.contains(&error.reason()),
+                "{} missing from UpgradeError::REASONS",
+                error.reason()
+            );
+        }
+    }
+
+    /// The `Display` output, unlike `reason()`, is expected to carry the detail needed for a log
+    /// line.
+    #[test]
+    fn test_upgrade_error_display_includes_detail() {
+        assert_eq!(
+            UpgradeError::ChildTimeout.to_string(),
+            "timed out waiting for ready signal from child"
+        );
+        assert_eq!(
+            UpgradeError::NotStarted("Already in upgrade".into()).to_string(),
+            "upgrade not started: Already in upgrade"
+        );
+        assert_eq!(
+            UpgradeError::Internal("channel closed".into()).to_string(),
+            "internal error: channel closed"
+        );
+    }
+
+    /// `UpgradeError` must be a real `std::error::Error` so applications can propagate it.
+    #[test]
+    fn test_upgrade_error_is_std_error() {
+        fn assert_error<E: std::error::Error + Send + Sync + 'static>(_: &E) {}
+        assert_error(&UpgradeError::ChildExit);
+
+        assert!(std::error::Error::source(&UpgradeError::ChildExit).is_none());
+        assert!(
+            std::error::Error::source(&UpgradeError::SerializationError(Box::new(
+                bincode::ErrorKind::SizeLimit
+            )))
+            .is_some()
+        );
+    }
 }

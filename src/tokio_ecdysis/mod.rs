@@ -38,7 +38,7 @@ use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 #[cfg(target_os = "linux")]
 use crate::seqpacket::UnixSeqpacketListenerStream;
 
-use super::{executioner::upgrade, Ecdysis, UpgradeFinished};
+use super::{executioner::upgrade, Ecdysis, UpgradeError, UpgradeFinished};
 
 use supervisor::Supervisor;
 #[cfg(feature = "systemd_notify")]
@@ -85,9 +85,14 @@ pub(crate) enum ExitCondition {
     PartialStop,
 }
 
+/// Callback invoked on every failed upgrade attempt. See
+/// [`TokioEcdysisBuilder::on_upgrade_failure`].
+pub type UpgradeFailureCallback = Box<dyn Fn(&UpgradeError) + Send + Sync>;
+
 pub struct TokioEcdysisBuilder {
     tokio_ecdysis: TokioEcdysis,
     triggers: Vec<(Trigger, ExitCondition)>,
+    on_upgrade_failure: Option<UpgradeFailureCallback>,
     #[cfg(feature = "systemd_notify")]
     systemd_notifier: Option<SystemdNotifier>,
 }
@@ -115,6 +120,7 @@ impl TokioEcdysisBuilder {
         Ok(Self {
             tokio_ecdysis: TokioEcdysis::new(),
             triggers,
+            on_upgrade_failure: None,
             #[cfg(feature = "systemd_notify")]
             systemd_notifier: None,
         })
@@ -213,6 +219,43 @@ impl TokioEcdysisBuilder {
         self.tokio_ecdysis.inner.set_pid_file(pid_file)
     }
 
+    /// Register a callback invoked every time an upgrade attempt fails.
+    ///
+    /// Ecdysis deliberately recovers from most upgrade failures: the parent keeps its listening
+    /// sockets, rewrites its pidfile, and retries on the next trigger. That means a failing
+    /// upgrade is otherwise invisible to the application, since the future returned by
+    /// [`TokioEcdysisBuilder::ready`] does not resolve. This hook exposes those failures so the
+    /// application can (for example) increment a counter and alert on it.
+    ///
+    /// Use [`UpgradeError::reason`] for a bounded value suitable as a metric label; the `Display`
+    /// representation carries unbounded detail and is better suited to a log line.
+    ///
+    /// The callback also fires for the unrecoverable [`UpgradeError::Internal`] case, immediately
+    /// before the upgrade future resolves with an error.
+    ///
+    /// The callback runs inline on the task driving the upgrade future, so it must not block.
+    ///
+    /// ```no_run
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use ecdysis::tokio_ecdysis::{SignalKind, TokioEcdysisBuilder};
+    ///
+    /// static UPGRADE_FAILURES: AtomicU64 = AtomicU64::new(0);
+    ///
+    /// let mut builder = TokioEcdysisBuilder::new(SignalKind::hangup())?;
+    /// builder.on_upgrade_failure(|error| {
+    ///     // `error.reason()` is bounded and safe to use as a metric label.
+    ///     log::warn!("upgrade failed ({}): {error}", error.reason());
+    ///     UPGRADE_FAILURES.fetch_add(1, Ordering::Relaxed);
+    /// });
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn on_upgrade_failure<F>(&mut self, callback: F)
+    where
+        F: Fn(&UpgradeError) + Send + Sync + 'static,
+    {
+        self.on_upgrade_failure = Some(Box::new(callback));
+    }
+
     #[cfg(feature = "systemd_notify")]
     pub fn enable_systemd_notifications(&mut self) -> Result<(), SystemdNotifierError> {
         // Make sure to verify that we can notify systemd _before_ notifying our parent that we are
@@ -247,6 +290,7 @@ impl TokioEcdysisBuilder {
         let Self {
             mut tokio_ecdysis,
             triggers,
+            on_upgrade_failure,
             #[cfg(feature = "systemd_notify")]
             systemd_notifier,
         } = self;
@@ -258,6 +302,7 @@ impl TokioEcdysisBuilder {
         let upgrader = TokioEcdysisUpgrader {
             tokio_ecdysis: tokio_ecdysis_arc.clone(),
             triggers,
+            on_upgrade_failure,
             #[cfg(feature = "systemd_notify")]
             systemd_notifier,
         };
@@ -653,11 +698,20 @@ pub type TokioEcdysisUpgradeResult = Result<(ExitMode, ExitReason), String>;
 struct TokioEcdysisUpgrader {
     tokio_ecdysis: Arc<TokioEcdysis>,
     triggers: Vec<(Trigger, ExitCondition)>,
+    on_upgrade_failure: Option<UpgradeFailureCallback>,
     #[cfg(feature = "systemd_notify")]
     systemd_notifier: Option<SystemdNotifier>,
 }
 
 impl TokioEcdysisUpgrader {
+    /// Notify the application that an upgrade attempt failed, if it registered a callback with
+    /// [`TokioEcdysisBuilder::on_upgrade_failure`].
+    fn report_upgrade_failure(&self, error: &UpgradeError) {
+        if let Some(callback) = &self.on_upgrade_failure {
+            callback(error);
+        }
+    }
+
     /// [`TokioEcdysisUpgrader::initialize()`] runs any initialization procedures (for instance,
     /// notifying systemd that the process is ready).
     async fn initialize(&mut self) -> Result<(), String> {
@@ -824,6 +878,7 @@ impl TokioEcdysisUpgrader {
                     }
                     Err(e) => {
                         // something went wrong during the upgrade, try again
+                        self.report_upgrade_failure(&e);
                         log::warn!("Upgrade failed: {e}");
                         log::warn!("Ecdysis returning to listening state!");
 
@@ -835,6 +890,7 @@ impl TokioEcdysisUpgrader {
                 Err(err_str) => {
                     // either a channel error or an error notifying systemd (if enabled)
                     // Die and let any external process supervisors take over
+                    self.report_upgrade_failure(&UpgradeError::Internal(err_str.clone()));
                     self.on_shutdown().await?;
                     Err(format!("Encountered a problem during upgrade: {err_str}"))
                 }
