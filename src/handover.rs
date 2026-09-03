@@ -704,12 +704,15 @@ fn recv_frame(socket: RawFd, limits: HandoverLimits) -> Result<Frame, HandoverEr
         (message.bytes, message.flags, raw_fds)
     };
 
-    let mut fds = Vec::with_capacity(raw_fds.len());
-    for fd in raw_fds {
-        // SAFETY: SCM_RIGHTS created a new descriptor owned by this process.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let fds: Vec<OwnedFd> = raw_fds
+        .into_iter()
+        .map(|fd| {
+            // SAFETY: SCM_RIGHTS created a new descriptor owned by this process.
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        })
+        .collect();
+    for fd in &fds {
         set_cloexec(fd.as_raw_fd())?;
-        fds.push(fd);
     }
 
     if message_flags.intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC) {
