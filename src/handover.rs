@@ -357,6 +357,7 @@ struct Frame {
 pub struct HandoverPeer {
     socket: UnixDatagram,
     limits: HandoverLimits,
+    readiness_gate: Option<u64>,
 }
 
 impl HandoverPeer {
@@ -365,7 +366,11 @@ impl HandoverPeer {
     }
 
     pub fn with_limits(socket: UnixDatagram, limits: HandoverLimits) -> io::Result<Self> {
-        let peer = Self { socket, limits };
+        let peer = Self {
+            socket,
+            limits,
+            readiness_gate: None,
+        };
         peer.set_timeout(Some(DEFAULT_HANDOVER_TIMEOUT))?;
         Ok(peer)
     }
@@ -381,6 +386,11 @@ impl HandoverPeer {
 
     pub fn into_inner(self) -> UnixDatagram {
         self.socket
+    }
+
+    pub(crate) fn with_readiness_gate(mut self, readiness_gate: u64) -> Self {
+        self.readiness_gate = Some(readiness_gate);
+        self
     }
 
     /// Request application state from the immediately previous process generation.
@@ -768,7 +778,7 @@ pub struct PreparedIncoming<'a> {
 /// Proof that the parent committed a child-side handover transaction.
 #[must_use = "pass this token to Ecdysis::complete_handover before declaring readiness"]
 pub struct HandoverCommit {
-    _transaction_id: u64,
+    pub(crate) readiness_gate: Option<u64>,
 }
 
 impl PreparedIncoming<'_> {
@@ -784,7 +794,7 @@ impl PreparedIncoming<'_> {
                     )));
                 }
                 Ok(HandoverCommit {
-                    _transaction_id: self.transaction_id,
+                    readiness_gate: self.peer.readiness_gate,
                 })
             }
             MessageKind::Abort => Err(abort_error(frame)?),

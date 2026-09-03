@@ -14,6 +14,7 @@ mod seqpacket;
 mod utils;
 
 use std::{
+    collections::HashSet,
     io,
     io::Write,
     net::{SocketAddr, TcpListener, UdpSocket},
@@ -63,7 +64,8 @@ pub struct Ecdysis {
     ready_notifier: Option<os_pipe::PipeWriter>,
     pid_file: Option<PathBuf>,
     child: bool,
-    pending_handovers: usize,
+    pending_handovers: HashSet<u64>,
+    next_handover_gate: u64,
 }
 
 impl Default for Ecdysis {
@@ -99,7 +101,8 @@ impl Ecdysis {
             ready_notifier,
             child,
             pid_file: None,
-            pending_handovers: 0,
+            pending_handovers: HashSet::new(),
+            next_handover_gate: 1,
         }
     }
 
@@ -134,12 +137,12 @@ impl Ecdysis {
     /// in the child, the parent will eventually timeout and kill the child on the assumption that
     /// something is broken in the child.
     pub fn ready(&mut self) -> io::Result<()> {
-        if self.pending_handovers != 0 {
+        if !self.pending_handovers.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!(
                     "cannot declare readiness with {} uncommitted handover transaction(s)",
-                    self.pending_handovers
+                    self.pending_handovers.len()
                 ),
             ));
         }
@@ -360,11 +363,17 @@ impl Ecdysis {
         let (parent, child) = self.unix_datagram_pair(name);
         let parent = parent.map(HandoverPeer::new).transpose()?;
         let child = HandoverPeer::new(child?)?;
-        if parent.is_some() {
-            self.pending_handovers = self.pending_handovers.checked_add(1).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "too many handover channels")
-            })?;
-        }
+        let parent = match parent {
+            Some(parent) => {
+                let gate = self.next_handover_gate;
+                self.next_handover_gate = gate.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "too many handover channels")
+                })?;
+                self.pending_handovers.insert(gate);
+                Some(parent.with_readiness_gate(gate))
+            }
+            None => None,
+        };
         Ok((parent, child))
     }
 
@@ -380,21 +389,25 @@ impl Ecdysis {
     where
         F: FnOnce(),
     {
-        if self.pending_handovers == 0 {
+        let gate = commit.readiness_gate.ok_or_else(|| {
+            HandoverError::Protocol("commit token is not associated with Ecdysis readiness".into())
+        })?;
+        if !self.pending_handovers.remove(&gate) {
             return Err(HandoverError::Protocol(
-                "no handover transaction is awaiting completion".into(),
+                "commit token does not match a pending handover channel".into(),
             ));
         }
         activate();
-        self.pending_handovers -= 1;
-        drop(commit);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, collections::HashSet};
+
     use super::{Ecdysis, ListenerRegistry};
+    use crate::handover::{HandoverCommit, HandoverError};
 
     #[test]
     fn pending_handover_blocks_readiness() {
@@ -403,11 +416,70 @@ mod tests {
             ready_notifier: None,
             pid_file: None,
             child: true,
-            pending_handovers: 1,
+            pending_handovers: HashSet::from([1]),
+            next_handover_gate: 2,
         };
 
         let error = ecdysis.ready().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        assert_eq!(ecdysis.pending_handovers, 1);
+        assert_eq!(ecdysis.pending_handovers, HashSet::from([1]));
+    }
+
+    #[test]
+    fn commit_releases_only_its_own_readiness_gate() {
+        let mut ecdysis = Ecdysis {
+            registry: ListenerRegistry::new(),
+            ready_notifier: None,
+            pid_file: None,
+            child: true,
+            pending_handovers: HashSet::from([10, 20]),
+            next_handover_gate: 21,
+        };
+        let activated = Cell::new(false);
+
+        ecdysis
+            .complete_handover(
+                HandoverCommit {
+                    readiness_gate: Some(10),
+                },
+                || activated.set(true),
+            )
+            .unwrap();
+        assert!(activated.get());
+        assert_eq!(ecdysis.pending_handovers, HashSet::from([20]));
+
+        let error = ecdysis
+            .complete_handover(
+                HandoverCommit {
+                    readiness_gate: Some(10),
+                },
+                || panic!("reused token activated state"),
+            )
+            .unwrap_err();
+        assert!(matches!(error, HandoverError::Protocol(_)));
+        assert_eq!(ecdysis.pending_handovers, HashSet::from([20]));
+    }
+
+    #[test]
+    fn standalone_commit_cannot_release_readiness() {
+        let mut ecdysis = Ecdysis {
+            registry: ListenerRegistry::new(),
+            ready_notifier: None,
+            pid_file: None,
+            child: true,
+            pending_handovers: HashSet::from([1]),
+            next_handover_gate: 2,
+        };
+
+        let error = ecdysis
+            .complete_handover(
+                HandoverCommit {
+                    readiness_gate: None,
+                },
+                || panic!("standalone token activated state"),
+            )
+            .unwrap_err();
+        assert!(matches!(error, HandoverError::Protocol(_)));
+        assert_eq!(ecdysis.pending_handovers, HashSet::from([1]));
     }
 }
