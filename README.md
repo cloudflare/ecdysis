@@ -41,7 +41,7 @@ The handover protocol is transactional:
 
 1. The child requests a supported range of application protocol versions.
 2. The parent quiesces resources and sends named descriptor/state items while retaining its originals.
-3. The child reconstructs dormant state and replies that it is prepared.
+3. The child completes all fallible reconstruction of dormant state and replies that it is prepared.
 4. The parent commits and relinquishes its originals, or aborts and resumes them.
 5. The child activates state only after commit. `Ecdysis::ready` rejects readiness while an inherited handover remains uncommitted.
 

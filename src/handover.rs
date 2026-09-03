@@ -8,9 +8,10 @@
 //! Before sending an item, the parent must quiesce it without irreversibly discarding state. It
 //! keeps ownership of its original descriptors until [`PreparedHandover::commit`] succeeds. The
 //! child may reconstruct state from received descriptors, but must leave it dormant until
-//! [`PreparedIncoming::wait_for_commit`] returns. Before commit, either side may abort; the child
-//! drops its copies and the parent resumes its originals. A child using [`crate::Ecdysis`] should
-//! pass the returned [`HandoverCommit`] to [`crate::Ecdysis::complete_handover`] before `ready`.
+//! [`PreparedIncoming::wait_for_commit`] returns. Either side may abort before the child declares
+//! itself prepared; after that declaration, activation must be infallible, while the parent may
+//! still abort until it commits. A child using [`crate::Ecdysis`] should pass the returned
+//! [`HandoverCommit`] to [`crate::Ecdysis::complete_handover`] before `ready`.
 
 use std::{
     fmt,
@@ -434,6 +435,7 @@ impl HandoverPeer {
             versions,
             application_version: None,
             finished: false,
+            failed: false,
             usage: TransactionUsage::default(),
         })
     }
@@ -686,14 +688,28 @@ pub struct IncomingHandover<'a> {
     versions: SupportedVersions,
     application_version: Option<u16>,
     finished: bool,
+    failed: bool,
     usage: TransactionUsage,
 }
 
 impl<'a> IncomingHandover<'a> {
     pub fn receive_item(&mut self) -> Result<Option<HandoverItem>, HandoverError> {
+        if self.failed {
+            return Err(HandoverError::Protocol(
+                "handover transaction already failed".into(),
+            ));
+        }
         if self.finished {
             return Ok(None);
         }
+        let result = self.receive_item_inner();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn receive_item_inner(&mut self) -> Result<Option<HandoverItem>, HandoverError> {
         let frame = self.peer.recv_transaction_frame(self.transaction_id)?;
         match frame.kind {
             MessageKind::Item => {
@@ -721,6 +737,11 @@ impl<'a> IncomingHandover<'a> {
     }
 
     pub fn prepare(self) -> Result<PreparedIncoming<'a>, HandoverError> {
+        if self.failed {
+            return Err(HandoverError::Protocol(
+                "cannot prepare a failed handover transaction".into(),
+            ));
+        }
         if !self.finished {
             return Err(HandoverError::Protocol(
                 "cannot prepare before the finished message".into(),
@@ -1408,6 +1429,52 @@ mod tests {
         assert_eq!(request.supported_versions(), SupportedVersions::exact(2));
         let outgoing = request.begin(2).unwrap();
         outgoing.finish().unwrap().wait().unwrap().commit().unwrap();
+        child_thread.join().unwrap();
+    }
+
+    #[test]
+    fn rejected_item_poisoned_the_transaction() {
+        let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
+        let child_thread = thread::spawn(move || {
+            let mut incoming = child.request(SupportedVersions::exact(1)).unwrap();
+            assert!(matches!(
+                incoming.receive_item(),
+                Err(HandoverError::Protocol(_))
+            ));
+            assert!(matches!(
+                incoming.receive_item(),
+                Err(HandoverError::Protocol(_))
+            ));
+            assert!(matches!(
+                incoming.prepare(),
+                Err(HandoverError::Protocol(_))
+            ));
+        });
+
+        let request = parent.receive_request().unwrap();
+        let outgoing = request.begin(1).unwrap();
+        outgoing
+            .peer
+            .send_frame(
+                MessageKind::Item,
+                outgoing.transaction_id,
+                outgoing.application_version,
+                &[0],
+                &[],
+            )
+            .unwrap();
+        outgoing
+            .peer
+            .send_frame(
+                MessageKind::Finished,
+                outgoing.transaction_id,
+                outgoing.application_version,
+                &[],
+                &[],
+            )
+            .unwrap();
         child_thread.join().unwrap();
     }
 }
