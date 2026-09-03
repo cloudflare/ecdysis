@@ -80,12 +80,19 @@ ecdysis.ready()?;
 
 `TokioEcdysisBuilder::handover_channel` returns `TokioHandoverPeer`. Its `run` method executes a
 complete synchronous transaction on Tokio's blocking pool without blocking a runtime worker.
+Cancelling the returned future does not cancel the blocking closure, so the closure must keep
+timeouts enabled and contain no unbounded loops or unrelated blocking work.
 
 Descriptor transfer does not capture userspace buffers or protocol state. In particular, passing a
 socket used by Hyper, Axum, a TLS library, or another protocol engine does not migrate that engine's
 in-flight state. Only transfer resources that the application can fully quiesce, serialize, rebuild,
 and leave dormant until commit. The runnable `transactional_handover` example demonstrates the wire
 and ownership sequence with an application-managed stream.
+
+On platforms without `MSG_CMSG_CLOEXEC`, Ecdysis must set `FD_CLOEXEC` after receipt, leaving the
+usual race with concurrent `fork`/`exec`. A child crash after commit is also not recoverable by the
+parent: all fallible child reconstruction must finish before `Prepared`, and activation after commit
+must be infallible apart from process-level failures.
 
 ### `systemd-notify` support
 

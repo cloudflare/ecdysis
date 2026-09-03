@@ -6,9 +6,10 @@ use crate::handover::HandoverPeer;
 
 /// A handover peer whose transaction can run without blocking a Tokio worker.
 ///
-/// [`run`](Self::run) owns the peer for the duration of the blocking operation. This makes
-/// cancellation safe: cancelling the awaiting task does not expose the peer for concurrent use,
-/// and the configured handover timeout eventually ends the blocking operation.
+/// [`run`](Self::run) owns the peer for the duration of the blocking operation. Dropping the future
+/// does not cancel a running `spawn_blocking` operation; the peer remains unavailable until the
+/// closure returns and runtime shutdown may wait for it. Callers must keep handover timeouts enabled
+/// and must not place unbounded loops or unrelated blocking work in the closure.
 pub struct TokioHandoverPeer {
     inner: HandoverPeer,
 }
@@ -22,7 +23,8 @@ impl TokioHandoverPeer {
     ///
     /// The peer is returned so a parent can serve a later upgrade attempt after an abort or
     /// timeout. `operation` commonly returns a `Result`, which remains nested inside the join
-    /// result so thread failure and handover failure stay distinct.
+    /// result so thread failure and handover failure stay distinct. Cancelling the returned future
+    /// does not stop `operation`.
     pub async fn run<F, T>(mut self, operation: F) -> Result<(Self, T), JoinError>
     where
         F: FnOnce(&mut HandoverPeer) -> T + Send + 'static,
