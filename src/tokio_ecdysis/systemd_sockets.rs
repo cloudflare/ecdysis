@@ -144,7 +144,11 @@ impl SystemdSockets {
 
         for (i, &fd_name) in names.iter().enumerate() {
             let fd = SD_LISTEN_FDS_START + i as i32;
-            set_cloexec(fd);
+            set_cloexec(fd).map_err(|error| {
+                SystemdSocketsReadError::EnvironmentVariableError(format!(
+                    "failed to set CLOEXEC on systemd socket {fd}: {error}"
+                ))
+            })?;
             if special_socket_names.contains(fd_name) {
                 log::warn!(
                     "socket name not supported. FDNAME \"{}\", fd {} ignored",

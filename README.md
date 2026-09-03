@@ -22,7 +22,7 @@ There are [many ways to implement graceful upgrades](https://blog.cloudflare.com
 
 * No old code keeps running after a successful upgrade
 * The new process has a grace period for performing initialisation
-* Crashing during initialisation is OK
+* Crashing during initialisation before handover commit is OK
 * Only a single upgrade is ever run in parallel
 
 ## Features
@@ -30,6 +30,72 @@ There are [many ways to implement graceful upgrades](https://blog.cloudflare.com
 `ecdysis` provides an extension for working with [Tokio streams](https://docs.rs/tokio-stream/latest/tokio_stream/) in a reactor environment when the feature `tokio_ecdysis` is enabled (enabled by default).
 
 Two features are provided for integrating `ecdysis` with `systemd`. `systemd_notify` enables service status notifications; `systemd_sockets` enables support for `systemd` named sockets. A compound `systemd` feature to enable both the `systemd_notify` and `systemd_sockets` features at once is also provided.
+
+### Transactional active-state handover
+
+Listener inheritance leaves established connections in the old process to drain. Applications that
+own serializable connection or worker state can instead use `Ecdysis::handover_channel` to transfer
+one or more file descriptors and opaque state payloads with `SCM_RIGHTS`.
+
+The handover protocol is transactional:
+
+1. The child requests a supported range of application protocol versions.
+2. The parent quiesces resources and sends named descriptor/state items while retaining its originals.
+3. The child completes all fallible reconstruction of dormant state and replies that it is prepared.
+4. The parent commits and relinquishes its originals, or aborts and resumes them.
+5. The child activates state only after commit. `Ecdysis::ready` rejects readiness while an inherited handover remains uncommitted.
+
+Creating the same named channel in each generation gives the process an optional endpoint to its
+parent and an endpoint for its next child:
+
+```rust,no_run
+use ecdysis::{handover::SupportedVersions, Ecdysis};
+
+# struct DormantState(Vec<ecdysis::handover::HandoverItem>);
+# fn reconstruct(items: Vec<ecdysis::handover::HandoverItem>) -> Result<DormantState, Box<dyn std::error::Error>> { Ok(DormantState(items)) }
+# fn activate(_state: DormantState) {}
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut ecdysis = Ecdysis::new();
+let (from_parent, to_child) = ecdysis.handover_channel("active-connections".into())?;
+
+if let Some(mut from_parent) = from_parent {
+    let mut incoming = from_parent.request(SupportedVersions::exact(1))?;
+    let mut items = Vec::new();
+    while let Some(item) = incoming.receive_item()? {
+        items.push(item);
+    }
+
+    // Complete all fallible work, but do not poll the reconstructed state.
+    let dormant = reconstruct(items)?;
+    let commit = incoming.prepare()?.wait_for_commit()?;
+    ecdysis.complete_handover(commit, || activate(dormant))?;
+}
+
+ecdysis.ready()?;
+
+// When this generation later upgrades, run the parent transaction concurrently with upgrade().
+// The handler must quiesce state before send_item, commit it only after finish().wait(), and resume
+// the original state after every error before commit.
+# drop(to_child);
+# Ok(())
+# }
+```
+
+`TokioEcdysisBuilder::handover_channel` returns `TokioHandoverPeer`. Its `run` method executes a
+complete synchronous transaction on Tokio's blocking pool without blocking a runtime worker.
+Cancelling the returned future does not cancel the blocking closure, so the closure must keep
+timeouts enabled and contain no unbounded loops or unrelated blocking work.
+
+Descriptor transfer does not capture userspace buffers or protocol state. In particular, passing a
+socket used by Hyper, Axum, a TLS library, or another protocol engine does not migrate that engine's
+in-flight state. Only transfer resources that the application can fully quiesce, serialize, rebuild,
+and leave dormant until commit. The runnable `transactional_handover` example demonstrates the wire
+and ownership sequence with an application-managed stream.
+
+On platforms without `MSG_CMSG_CLOEXEC`, Ecdysis must set `FD_CLOEXEC` after receipt, leaving the
+usual race with concurrent `fork`/`exec`. A child crash after commit is also not recoverable by the
+parent: all fallible child reconstruction must finish before `Prepared`, and activation after commit
+must be infallible apart from process-level failures.
 
 ### `systemd-notify` support
 

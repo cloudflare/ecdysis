@@ -73,7 +73,10 @@ impl ListenerRegistry {
                 let li = fds.remove(p);
                 let fd = li.fd;
                 // at this point, the inherited fd is not CLOEXEC, fix that
-                set_cloexec(fd);
+                if set_cloexec(fd).is_err() {
+                    close_fd_quiet(fd);
+                    return None;
+                }
                 Some(fd)
             }
             None => None,

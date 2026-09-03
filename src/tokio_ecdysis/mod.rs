@@ -13,6 +13,7 @@ use std::{
     thread,
 };
 
+pub mod handover;
 #[cfg(feature = "systemd_sockets")]
 pub(super) mod systemd_sockets;
 
@@ -42,7 +43,9 @@ use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 use crate::seqpacket::UnixSeqpacketListenerStream;
 
 use super::{executioner::upgrade, Ecdysis, UpgradeFinished};
+use crate::handover::{HandoverCommit, HandoverError};
 
+use handover::TokioHandoverPeer;
 use supervisor::Supervisor;
 #[cfg(feature = "systemd_notify")]
 use systemd_notify::{SystemdNotifier, SystemdNotifierError};
@@ -214,6 +217,27 @@ impl TokioEcdysisBuilder {
     /// Set a pidfile for this application. See Ecdysis::set_pid_file()
     pub fn set_pid_file<P: AsRef<Path>>(&mut self, pid_file: P) {
         self.tokio_ecdysis.inner.set_pid_file(pid_file)
+    }
+
+    /// Create a Tokio-compatible handover channel between adjacent process generations.
+    pub fn handover_channel(
+        &mut self,
+        name: String,
+    ) -> io::Result<(Option<TokioHandoverPeer>, TokioHandoverPeer)> {
+        let (parent, child) = self.tokio_ecdysis.inner.handover_channel(name)?;
+        Ok((parent.map(TokioHandoverPeer::new), child.into()))
+    }
+
+    /// Activate committed state and release one handover readiness gate.
+    pub fn complete_handover<F>(
+        &mut self,
+        commit: HandoverCommit,
+        activate: F,
+    ) -> Result<(), HandoverError>
+    where
+        F: FnOnce(),
+    {
+        self.tokio_ecdysis.inner.complete_handover(commit, activate)
     }
 
     #[cfg(feature = "systemd_notify")]
