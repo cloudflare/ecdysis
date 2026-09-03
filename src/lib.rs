@@ -345,8 +345,9 @@ impl Ecdysis {
     pub fn handover_channel(
         &self,
         name: String,
-    ) -> (Option<HandoverPeer>, io::Result<HandoverPeer>) {
+    ) -> io::Result<(Option<HandoverPeer>, HandoverPeer)> {
         let (parent, child) = self.unix_datagram_pair(name);
-        (parent.map(HandoverPeer::new), child.map(HandoverPeer::new))
+        let parent = parent.map(HandoverPeer::new).transpose()?;
+        Ok((parent, HandoverPeer::new(child?)?))
     }
 }

@@ -24,6 +24,12 @@ const HEADER_LEN: usize = 24;
 const HARD_MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 const HARD_MAX_FDS_PER_ITEM: usize = 64;
 const HARD_MAX_NAME_SIZE: usize = 255;
+const HARD_MAX_ITEMS: usize = 4096;
+const HARD_MAX_TOTAL_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
+const HARD_MAX_TOTAL_FDS: usize = 4096;
+
+/// Default upper bound for each blocking handover operation.
+pub const DEFAULT_HANDOVER_TIMEOUT: Duration = Duration::from_secs(5);
 
 static NEXT_TRANSACTION: AtomicU32 = AtomicU32::new(1);
 
@@ -62,6 +68,9 @@ pub struct HandoverLimits {
     max_payload_size: usize,
     max_fds_per_item: usize,
     max_name_size: usize,
+    max_items: usize,
+    max_total_payload_size: usize,
+    max_total_fds: usize,
 }
 
 impl HandoverLimits {
@@ -89,7 +98,36 @@ impl HandoverLimits {
             max_payload_size,
             max_fds_per_item,
             max_name_size,
+            ..Self::default()
         })
+    }
+
+    /// Set cumulative resource limits for one transaction.
+    pub fn with_transaction_limits(
+        mut self,
+        max_items: usize,
+        max_total_payload_size: usize,
+        max_total_fds: usize,
+    ) -> Result<Self, HandoverError> {
+        if max_items > HARD_MAX_ITEMS {
+            return Err(HandoverError::Limit(format!(
+                "item limit exceeds hard maximum of {HARD_MAX_ITEMS}"
+            )));
+        }
+        if max_total_payload_size > HARD_MAX_TOTAL_PAYLOAD_SIZE {
+            return Err(HandoverError::Limit(format!(
+                "total payload limit exceeds hard maximum of {HARD_MAX_TOTAL_PAYLOAD_SIZE} bytes"
+            )));
+        }
+        if max_total_fds > HARD_MAX_TOTAL_FDS {
+            return Err(HandoverError::Limit(format!(
+                "total file descriptor limit exceeds hard maximum of {HARD_MAX_TOTAL_FDS}"
+            )));
+        }
+        self.max_items = max_items;
+        self.max_total_payload_size = max_total_payload_size;
+        self.max_total_fds = max_total_fds;
+        Ok(self)
     }
 
     pub fn max_payload_size(&self) -> usize {
@@ -103,6 +141,18 @@ impl HandoverLimits {
     pub fn max_name_size(&self) -> usize {
         self.max_name_size
     }
+
+    pub fn max_items(&self) -> usize {
+        self.max_items
+    }
+
+    pub fn max_total_payload_size(&self) -> usize {
+        self.max_total_payload_size
+    }
+
+    pub fn max_total_fds(&self) -> usize {
+        self.max_total_fds
+    }
 }
 
 impl Default for HandoverLimits {
@@ -111,7 +161,61 @@ impl Default for HandoverLimits {
             max_payload_size: HARD_MAX_PAYLOAD_SIZE,
             max_fds_per_item: HARD_MAX_FDS_PER_ITEM,
             max_name_size: HARD_MAX_NAME_SIZE,
+            max_items: 1024,
+            max_total_payload_size: HARD_MAX_TOTAL_PAYLOAD_SIZE,
+            max_total_fds: 1024,
         }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct TransactionUsage {
+    items: usize,
+    payload_size: usize,
+    fds: usize,
+}
+
+impl TransactionUsage {
+    fn with_item(
+        self,
+        payload_size: usize,
+        fds: usize,
+        limits: HandoverLimits,
+    ) -> Result<Self, HandoverError> {
+        let items = self
+            .items
+            .checked_add(1)
+            .ok_or_else(|| HandoverError::Limit("transaction item count overflowed".into()))?;
+        let payload_size = self
+            .payload_size
+            .checked_add(payload_size)
+            .ok_or_else(|| HandoverError::Limit("transaction payload size overflowed".into()))?;
+        let fds = self.fds.checked_add(fds).ok_or_else(|| {
+            HandoverError::Limit("transaction file descriptor count overflowed".into())
+        })?;
+        if items > limits.max_items {
+            return Err(HandoverError::Limit(format!(
+                "transaction exceeds its limit of {} items",
+                limits.max_items
+            )));
+        }
+        if payload_size > limits.max_total_payload_size {
+            return Err(HandoverError::Limit(format!(
+                "transaction exceeds its total payload limit of {} bytes",
+                limits.max_total_payload_size
+            )));
+        }
+        if fds > limits.max_total_fds {
+            return Err(HandoverError::Limit(format!(
+                "transaction exceeds its total limit of {} file descriptors",
+                limits.max_total_fds
+            )));
+        }
+        Ok(Self {
+            items,
+            payload_size,
+            fds,
+        })
     }
 }
 
@@ -248,15 +352,14 @@ pub struct HandoverPeer {
 }
 
 impl HandoverPeer {
-    pub fn new(socket: UnixDatagram) -> Self {
-        Self {
-            socket,
-            limits: HandoverLimits::default(),
-        }
+    pub fn new(socket: UnixDatagram) -> io::Result<Self> {
+        Self::with_limits(socket, HandoverLimits::default())
     }
 
-    pub fn with_limits(socket: UnixDatagram, limits: HandoverLimits) -> Self {
-        Self { socket, limits }
+    pub fn with_limits(socket: UnixDatagram, limits: HandoverLimits) -> io::Result<Self> {
+        let peer = Self { socket, limits };
+        peer.set_timeout(Some(DEFAULT_HANDOVER_TIMEOUT))?;
+        Ok(peer)
     }
 
     pub fn limits(&self) -> HandoverLimits {
@@ -288,6 +391,7 @@ impl HandoverPeer {
             versions,
             application_version: None,
             finished: false,
+            usage: TransactionUsage::default(),
         })
     }
 
@@ -359,6 +463,7 @@ impl<'a> HandoverRequest<'a> {
             peer: self.peer,
             transaction_id: self.transaction_id,
             application_version,
+            usage: TransactionUsage::default(),
         })
     }
 
@@ -372,6 +477,7 @@ pub struct OutgoingHandover<'a> {
     peer: &'a mut HandoverPeer,
     transaction_id: u64,
     application_version: u16,
+    usage: TransactionUsage,
 }
 
 impl<'a> OutgoingHandover<'a> {
@@ -407,13 +513,18 @@ impl<'a> OutgoingHandover<'a> {
         encoded.extend_from_slice(&(name.len() as u16).to_be_bytes());
         encoded.extend_from_slice(name.as_bytes());
         encoded.extend_from_slice(payload);
+        let usage = self
+            .usage
+            .with_item(encoded.len(), fds.len(), self.peer.limits)?;
         self.peer.send_frame(
             MessageKind::Item,
             self.transaction_id,
             self.application_version,
             &encoded,
             fds,
-        )
+        )?;
+        self.usage = usage;
+        Ok(())
     }
 
     pub fn finish(self) -> Result<AwaitingPrepared<'a>, HandoverError> {
@@ -502,6 +613,7 @@ pub struct IncomingHandover<'a> {
     versions: SupportedVersions,
     application_version: Option<u16>,
     finished: bool,
+    usage: TransactionUsage,
 }
 
 impl<'a> IncomingHandover<'a> {
@@ -514,7 +626,12 @@ impl<'a> IncomingHandover<'a> {
         match frame.kind {
             MessageKind::Item => {
                 self.observe_version(frame.application_version)?;
-                decode_item(frame, self.peer.limits).map(Some)
+                let usage =
+                    self.usage
+                        .with_item(frame.payload.len(), frame.fds.len(), self.peer.limits)?;
+                let item = decode_item(frame, self.peer.limits)?;
+                self.usage = usage;
+                Ok(Some(item))
             }
             MessageKind::Finished => {
                 require_control_frame(&frame, MessageKind::Finished)?;
@@ -933,8 +1050,8 @@ mod tests {
     #[test]
     fn transfers_multiple_items_and_commits() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let mut parent = HandoverPeer::new(parent_socket);
-        let mut child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
         let (mut stream, transferred_stream) = UnixStream::pair().unwrap();
 
         let child_thread = thread::spawn(move || {
@@ -974,8 +1091,8 @@ mod tests {
     #[test]
     fn abort_returns_descriptors_to_parent_control() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let mut parent = HandoverPeer::new(parent_socket);
-        let mut child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
         let (_stream, transferred_stream) = UnixStream::pair().unwrap();
 
         let child_thread = thread::spawn(move || {
@@ -1004,8 +1121,8 @@ mod tests {
     #[test]
     fn received_descriptors_are_close_on_exec() {
         let (sender_socket, receiver_socket) = UnixDatagram::pair().unwrap();
-        let sender = HandoverPeer::new(sender_socket);
-        let receiver = HandoverPeer::new(receiver_socket);
+        let sender = HandoverPeer::new(sender_socket).unwrap();
+        let receiver = HandoverPeer::new(receiver_socket).unwrap();
         let (_stream, transferred_stream) = UnixStream::pair().unwrap();
 
         sender
@@ -1025,8 +1142,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_application_version_without_sending() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let mut parent = HandoverPeer::new(parent_socket);
-        let mut child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
 
         let child_thread = thread::spawn(move || {
             let _incoming = child
@@ -1045,11 +1162,12 @@ mod tests {
     fn enforces_item_limits() {
         let (socket, _peer) = UnixDatagram::pair().unwrap();
         let limits = HandoverLimits::new(8, 1, 3).unwrap();
-        let mut peer = HandoverPeer::with_limits(socket, limits);
+        let mut peer = HandoverPeer::with_limits(socket, limits).unwrap();
         let mut outgoing = OutgoingHandover {
             peer: &mut peer,
             transaction_id: 1,
             application_version: 1,
+            usage: TransactionUsage::default(),
         };
         assert!(matches!(
             outgoing.send_item("long", b"", &[]),
@@ -1059,5 +1177,40 @@ mod tests {
             outgoing.send_item("ok", b"12345", &[]),
             Err(HandoverError::Limit(_))
         ));
+    }
+
+    #[test]
+    fn enforces_transaction_limits() {
+        let (socket, _peer) = UnixDatagram::pair().unwrap();
+        let limits = HandoverLimits::new(32, 1, 8)
+            .unwrap()
+            .with_transaction_limits(1, 32, 1)
+            .unwrap();
+        let mut peer = HandoverPeer::with_limits(socket, limits).unwrap();
+        let mut outgoing = OutgoingHandover {
+            peer: &mut peer,
+            transaction_id: 1,
+            application_version: 1,
+            usage: TransactionUsage::default(),
+        };
+        outgoing.send_item("one", b"state", &[]).unwrap();
+        assert!(matches!(
+            outgoing.send_item("two", b"state", &[]),
+            Err(HandoverError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn configures_a_default_timeout() {
+        let (socket, _peer) = UnixDatagram::pair().unwrap();
+        let peer = HandoverPeer::new(socket).unwrap();
+        assert_eq!(
+            peer.socket.read_timeout().unwrap(),
+            Some(DEFAULT_HANDOVER_TIMEOUT)
+        );
+        assert_eq!(
+            peer.socket.write_timeout().unwrap(),
+            Some(DEFAULT_HANDOVER_TIMEOUT)
+        );
     }
 }
