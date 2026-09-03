@@ -17,7 +17,6 @@ use std::{
     io::{self, IoSlice, IoSliceMut},
     os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
     os::unix::net::UnixDatagram,
-    sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -38,8 +37,6 @@ const HARD_MAX_TOTAL_FDS: usize = 4096;
 /// Default upper bound for each blocking handover operation.
 pub const DEFAULT_HANDOVER_TIMEOUT: Duration = Duration::from_secs(5);
 
-static NEXT_TRANSACTION: AtomicU32 = AtomicU32::new(1);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum MessageKind {
@@ -49,6 +46,8 @@ enum MessageKind {
     Prepared = 4,
     Commit = 5,
     Abort = 6,
+    Challenge = 7,
+    ChallengeResponse = 8,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -62,6 +61,8 @@ impl TryFrom<u8> for MessageKind {
             4 => Ok(Self::Prepared),
             5 => Ok(Self::Commit),
             6 => Ok(Self::Abort),
+            7 => Ok(Self::Challenge),
+            8 => Ok(Self::ChallengeResponse),
             _ => Err(HandoverError::Protocol(format!(
                 "unknown message kind {value}"
             ))),
@@ -387,11 +388,36 @@ impl HandoverPeer {
         &mut self,
         versions: SupportedVersions,
     ) -> Result<IncomingHandover<'_>, HandoverError> {
-        let transaction_id = next_transaction_id();
+        let transaction_id = random_u64()?;
         let mut payload = Vec::with_capacity(4);
         payload.extend_from_slice(&versions.min.to_be_bytes());
         payload.extend_from_slice(&versions.max.to_be_bytes());
         self.send_frame(MessageKind::Request, transaction_id, 0, &payload, &[])?;
+        loop {
+            let frame = self.recv_frame()?;
+            if frame.transaction_id != transaction_id {
+                continue;
+            }
+            match frame.kind {
+                MessageKind::Challenge => {
+                    if !frame.fds.is_empty() || frame.payload.len() != 16 {
+                        return Err(HandoverError::Protocol(
+                            "challenge must contain 16 bytes and no file descriptors".into(),
+                        ));
+                    }
+                    self.send_frame(
+                        MessageKind::ChallengeResponse,
+                        transaction_id,
+                        0,
+                        &frame.payload,
+                        &[],
+                    )?;
+                    break;
+                }
+                MessageKind::Abort => return Err(abort_error(frame)?),
+                kind => return Err(unexpected_message(kind, "challenge or abort")),
+            }
+        }
         Ok(IncomingHandover {
             peer: self,
             transaction_id,
@@ -404,23 +430,45 @@ impl HandoverPeer {
 
     /// Wait for a handover request from the immediately following process generation.
     pub fn receive_request(&mut self) -> Result<HandoverRequest<'_>, HandoverError> {
-        let frame = self.recv_frame()?;
-        require_control_frame(&frame, MessageKind::Request)?;
-        if frame.payload.len() != 4 {
-            return Err(HandoverError::Protocol(format!(
-                "request payload has {} bytes, expected 4",
-                frame.payload.len()
-            )));
+        let mut pending_request = None;
+        'request: loop {
+            let frame = match pending_request.take() {
+                Some(frame) => frame,
+                None => loop {
+                    let frame = self.recv_frame()?;
+                    if frame.kind == MessageKind::Request {
+                        break frame;
+                    }
+                },
+            };
+            let (transaction_id, versions) = decode_request(frame)?;
+            let challenge = random_bytes()?;
+            self.send_frame(MessageKind::Challenge, transaction_id, 0, &challenge, &[])?;
+
+            loop {
+                let frame = self.recv_frame()?;
+                if frame.kind == MessageKind::Request {
+                    pending_request = Some(frame);
+                    continue 'request;
+                }
+                if frame.kind != MessageKind::ChallengeResponse
+                    || frame.transaction_id != transaction_id
+                    || frame.payload != challenge
+                {
+                    continue;
+                }
+                if !frame.fds.is_empty() {
+                    return Err(HandoverError::Protocol(
+                        "challenge response carried file descriptors".into(),
+                    ));
+                }
+                return Ok(HandoverRequest {
+                    peer: self,
+                    transaction_id,
+                    versions,
+                });
+            }
         }
-        let versions = SupportedVersions::new(
-            u16::from_be_bytes([frame.payload[0], frame.payload[1]]),
-            u16::from_be_bytes([frame.payload[2], frame.payload[3]]),
-        )?;
-        Ok(HandoverRequest {
-            peer: self,
-            transaction_id: frame.transaction_id,
-            versions,
-        })
     }
 
     fn send_frame(
@@ -444,6 +492,15 @@ impl HandoverPeer {
 
     fn recv_frame(&self) -> Result<Frame, HandoverError> {
         recv_frame(self.socket.as_raw_fd(), self.limits)
+    }
+
+    fn recv_transaction_frame(&self, transaction_id: u64) -> Result<Frame, HandoverError> {
+        loop {
+            let frame = self.recv_frame()?;
+            if frame.transaction_id == transaction_id {
+                return Ok(frame);
+            }
+        }
     }
 }
 
@@ -564,8 +621,7 @@ pub struct AwaitingPrepared<'a> {
 
 impl<'a> AwaitingPrepared<'a> {
     pub fn wait(self) -> Result<PreparedHandover<'a>, HandoverError> {
-        let frame = self.peer.recv_frame()?;
-        require_transaction(&frame, self.transaction_id)?;
+        let frame = self.peer.recv_transaction_frame(self.transaction_id)?;
         match frame.kind {
             MessageKind::Prepared => {
                 require_control_frame(&frame, MessageKind::Prepared)?;
@@ -628,8 +684,7 @@ impl<'a> IncomingHandover<'a> {
         if self.finished {
             return Ok(None);
         }
-        let frame = self.peer.recv_frame()?;
-        require_transaction(&frame, self.transaction_id)?;
+        let frame = self.peer.recv_transaction_frame(self.transaction_id)?;
         match frame.kind {
             MessageKind::Item => {
                 self.observe_version(frame.application_version)?;
@@ -718,8 +773,7 @@ pub struct HandoverCommit {
 
 impl PreparedIncoming<'_> {
     pub fn wait_for_commit(self) -> Result<HandoverCommit, HandoverError> {
-        let frame = self.peer.recv_frame()?;
-        require_transaction(&frame, self.transaction_id)?;
+        let frame = self.peer.recv_transaction_frame(self.transaction_id)?;
         match frame.kind {
             MessageKind::Commit => {
                 require_control_frame(&frame, MessageKind::Commit)?;
@@ -739,9 +793,33 @@ impl PreparedIncoming<'_> {
     }
 }
 
-fn next_transaction_id() -> u64 {
-    let sequence = NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed);
-    ((std::process::id() as u64) << 32) | u64::from(sequence)
+fn random_bytes() -> Result<[u8; 16], HandoverError> {
+    let mut bytes = [0; 16];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| HandoverError::Io(io::Error::other(error.to_string())))?;
+    Ok(bytes)
+}
+
+fn random_u64() -> Result<u64, HandoverError> {
+    let mut bytes = [0; 8];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| HandoverError::Io(io::Error::other(error.to_string())))?;
+    Ok(u64::from_ne_bytes(bytes))
+}
+
+fn decode_request(frame: Frame) -> Result<(u64, SupportedVersions), HandoverError> {
+    require_control_frame(&frame, MessageKind::Request)?;
+    if frame.payload.len() != 4 {
+        return Err(HandoverError::Protocol(format!(
+            "request payload has {} bytes, expected 4",
+            frame.payload.len()
+        )));
+    }
+    let versions = SupportedVersions::new(
+        u16::from_be_bytes([frame.payload[0], frame.payload[1]]),
+        u16::from_be_bytes([frame.payload[2], frame.payload[3]]),
+    )?;
+    Ok((frame.transaction_id, versions))
 }
 
 fn send_abort(peer: &HandoverPeer, transaction_id: u64, reason: &str) -> Result<(), HandoverError> {
@@ -951,16 +1029,6 @@ fn decode_item(frame: Frame, limits: HandoverLimits) -> Result<HandoverItem, Han
         payload: frame.payload[2 + name_len..].to_vec(),
         fds: frame.fds,
     })
-}
-
-fn require_transaction(frame: &Frame, expected: u64) -> Result<(), HandoverError> {
-    if frame.transaction_id != expected {
-        return Err(HandoverError::Protocol(format!(
-            "received transaction {}, expected {expected}",
-            frame.transaction_id
-        )));
-    }
-    Ok(())
 }
 
 fn require_control_frame(frame: &Frame, expected: MessageKind) -> Result<(), HandoverError> {
@@ -1303,5 +1371,33 @@ mod tests {
             HandoverError::Io(ref error)
                 if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
         ));
+    }
+
+    #[test]
+    fn skips_requests_and_frames_from_a_failed_generation() {
+        let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
+        let mut stale_request = Vec::new();
+        stale_request.extend_from_slice(&SupportedVersions::exact(1).min.to_be_bytes());
+        stale_request.extend_from_slice(&SupportedVersions::exact(1).max.to_be_bytes());
+        child_socket
+            .send(&encode_frame(MessageKind::Request, 1, 0, &stale_request, 0))
+            .unwrap();
+        child_socket
+            .send(&encode_frame(MessageKind::Prepared, 1, 1, &[], 0))
+            .unwrap();
+
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
+        let child_thread = thread::spawn(move || {
+            let mut incoming = child.request(SupportedVersions::exact(2)).unwrap();
+            assert!(incoming.receive_item().unwrap().is_none());
+            let _commit = incoming.prepare().unwrap().wait_for_commit().unwrap();
+        });
+
+        let request = parent.receive_request().unwrap();
+        assert_eq!(request.supported_versions(), SupportedVersions::exact(2));
+        let outgoing = request.begin(2).unwrap();
+        outgoing.finish().unwrap().wait().unwrap().commit().unwrap();
+        child_thread.join().unwrap();
     }
 }
