@@ -31,7 +31,7 @@ use socket2::Socket;
 pub use {crate::seqpacket::UnixSeqpacketListenerStream, tokio_seqpacket::UnixSeqpacketListener};
 
 use executioner::{upgrade, UpgradeFinished};
-use handover::HandoverPeer;
+use handover::{HandoverCommit, HandoverError, HandoverPeer};
 use inheriter::{init_child, InheritError};
 use registry::{ListenerRegistry, SockInfo};
 
@@ -63,6 +63,7 @@ pub struct Ecdysis {
     ready_notifier: Option<os_pipe::PipeWriter>,
     pid_file: Option<PathBuf>,
     child: bool,
+    pending_handovers: usize,
 }
 
 impl Default for Ecdysis {
@@ -98,6 +99,7 @@ impl Ecdysis {
             ready_notifier,
             child,
             pid_file: None,
+            pending_handovers: 0,
         }
     }
 
@@ -132,6 +134,15 @@ impl Ecdysis {
     /// in the child, the parent will eventually timeout and kill the child on the assumption that
     /// something is broken in the child.
     pub fn ready(&mut self) -> io::Result<()> {
+        if self.pending_handovers != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "cannot declare readiness with {} uncommitted handover transaction(s)",
+                    self.pending_handovers
+                ),
+            ));
+        }
         self.registry.close_inherited();
 
         let _ = self.write_pidfile();
@@ -343,11 +354,60 @@ impl Ecdysis {
     /// The first element communicates with this process's parent and is present only in an
     /// upgraded child. The second communicates with a future child spawned by this process.
     pub fn handover_channel(
-        &self,
+        &mut self,
         name: String,
     ) -> io::Result<(Option<HandoverPeer>, HandoverPeer)> {
         let (parent, child) = self.unix_datagram_pair(name);
         let parent = parent.map(HandoverPeer::new).transpose()?;
-        Ok((parent, HandoverPeer::new(child?)?))
+        let child = HandoverPeer::new(child?)?;
+        if parent.is_some() {
+            self.pending_handovers = self.pending_handovers.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "too many handover channels")
+            })?;
+        }
+        Ok((parent, child))
+    }
+
+    /// Activate state after its handover commits and release one readiness gate.
+    ///
+    /// `activate` must not fail: after commit, the parent is allowed to relinquish its copy and
+    /// cannot safely resume the old state.
+    pub fn complete_handover<F>(
+        &mut self,
+        commit: HandoverCommit,
+        activate: F,
+    ) -> Result<(), HandoverError>
+    where
+        F: FnOnce(),
+    {
+        if self.pending_handovers == 0 {
+            return Err(HandoverError::Protocol(
+                "no handover transaction is awaiting completion".into(),
+            ));
+        }
+        activate();
+        self.pending_handovers -= 1;
+        drop(commit);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Ecdysis, ListenerRegistry};
+
+    #[test]
+    fn pending_handover_blocks_readiness() {
+        let mut ecdysis = Ecdysis {
+            registry: ListenerRegistry::new(),
+            ready_notifier: None,
+            pid_file: None,
+            child: true,
+            pending_handovers: 1,
+        };
+
+        let error = ecdysis.ready().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(ecdysis.pending_handovers, 1);
     }
 }

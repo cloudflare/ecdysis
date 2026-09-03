@@ -4,6 +4,13 @@
 //! different: the application must stop using them and preserve any userspace protocol state before
 //! they can move. This module supplies the transport and transaction boundary while leaving those
 //! protocol-specific steps to the application.
+//!
+//! Before sending an item, the parent must quiesce it without irreversibly discarding state. It
+//! keeps ownership of its original descriptors until [`PreparedHandover::commit`] succeeds. The
+//! child may reconstruct state from received descriptors, but must leave it dormant until
+//! [`PreparedIncoming::wait_for_commit`] returns. Before commit, either side may abort; the child
+//! drops its copies and the parent resumes its originals. A child using [`crate::Ecdysis`] should
+//! pass the returned [`HandoverCommit`] to [`crate::Ecdysis::complete_handover`] before `ready`.
 
 use std::{
     fmt,
@@ -703,8 +710,14 @@ pub struct PreparedIncoming<'a> {
     application_version: u16,
 }
 
+/// Proof that the parent committed a child-side handover transaction.
+#[must_use = "pass this token to Ecdysis::complete_handover before declaring readiness"]
+pub struct HandoverCommit {
+    _transaction_id: u64,
+}
+
 impl PreparedIncoming<'_> {
-    pub fn wait_for_commit(self) -> Result<(), HandoverError> {
+    pub fn wait_for_commit(self) -> Result<HandoverCommit, HandoverError> {
         let frame = self.peer.recv_frame()?;
         require_transaction(&frame, self.transaction_id)?;
         match frame.kind {
@@ -716,7 +729,9 @@ impl PreparedIncoming<'_> {
                         frame.application_version, self.application_version
                     )));
                 }
-                Ok(())
+                Ok(HandoverCommit {
+                    _transaction_id: self.transaction_id,
+                })
             }
             MessageKind::Abort => Err(abort_error(frame)?),
             kind => Err(unexpected_message(kind, "commit or abort")),
@@ -1066,7 +1081,7 @@ mod tests {
             let mut transferred = UnixStream::from(fds.remove(0));
             assert!(incoming.receive_item().unwrap().is_none());
             let prepared = incoming.prepare().unwrap();
-            prepared.wait_for_commit().unwrap();
+            let _commit = prepared.wait_for_commit().unwrap();
             transferred.write_all(b"child").unwrap();
         });
 
