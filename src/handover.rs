@@ -1228,4 +1228,80 @@ mod tests {
             Some(DEFAULT_HANDOVER_TIMEOUT)
         );
     }
+
+    #[test]
+    fn closes_descriptors_from_a_malformed_frame() {
+        let (mut stream, transferred_stream) = UnixStream::pair().unwrap();
+        let duplicated = nix::unistd::dup(transferred_stream.as_raw_fd()).unwrap();
+        // SAFETY: dup returned a new descriptor owned by this process.
+        let duplicated = unsafe { OwnedFd::from_raw_fd(duplicated) };
+        drop(transferred_stream);
+        let frame = encode_frame(MessageKind::Item, 1, 1, &[0, 0], 0);
+
+        assert!(matches!(
+            decode_frame(frame, vec![duplicated], HandoverLimits::default()),
+            Err(HandoverError::Protocol(_))
+        ));
+        let mut byte = [0];
+        assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn rejects_truncated_datagrams() {
+        let (sender, receiver) = UnixDatagram::pair().unwrap();
+        let limits = HandoverLimits::new(4, 1, 4).unwrap();
+        let receiver = HandoverPeer::with_limits(receiver, limits).unwrap();
+        let oversized = encode_frame(MessageKind::Item, 1, 1, &[0; 5], 0);
+        sender.send(&oversized).unwrap();
+
+        assert!(matches!(
+            receiver.recv_frame(),
+            Err(HandoverError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn prepared_handover_can_still_abort() {
+        let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
+        let mut parent = HandoverPeer::new(parent_socket).unwrap();
+        let mut child = HandoverPeer::new(child_socket).unwrap();
+
+        let child_thread = thread::spawn(move || {
+            let mut incoming = child.request(SupportedVersions::exact(1)).unwrap();
+            assert!(incoming.receive_item().unwrap().is_none());
+            let error = match incoming.prepare().unwrap().wait_for_commit() {
+                Ok(_) => panic!("parent unexpectedly committed the handover"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, HandoverError::Aborted(ref reason) if reason == "parent resumed")
+            );
+        });
+
+        let request = parent.receive_request().unwrap();
+        let outgoing = request.begin(1).unwrap();
+        let prepared = outgoing.finish().unwrap().wait().unwrap();
+        prepared.abort("parent resumed").unwrap();
+        child_thread.join().unwrap();
+    }
+
+    #[test]
+    fn missing_peer_times_out() {
+        let (socket, peer) = UnixDatagram::pair().unwrap();
+        let mut receiver = HandoverPeer::new(socket).unwrap();
+        receiver
+            .set_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        drop(peer);
+
+        let error = match receiver.receive_request() {
+            Ok(_) => panic!("received a request from a closed peer"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            HandoverError::Io(ref error)
+                if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        ));
+    }
 }
