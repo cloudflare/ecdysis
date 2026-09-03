@@ -392,12 +392,13 @@ impl Ecdysis {
         let gate = commit.readiness_gate.ok_or_else(|| {
             HandoverError::Protocol("commit token is not associated with Ecdysis readiness".into())
         })?;
-        if !self.pending_handovers.remove(&gate) {
+        if !self.pending_handovers.contains(&gate) {
             return Err(HandoverError::Protocol(
                 "commit token does not match a pending handover channel".into(),
             ));
         }
         activate();
+        self.pending_handovers.remove(&gate);
         Ok(())
     }
 }
@@ -481,5 +482,34 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, HandoverError::Protocol(_)));
         assert_eq!(ecdysis.pending_handovers, HashSet::from([1]));
+    }
+
+    #[test]
+    fn activation_panic_keeps_readiness_blocked() {
+        let mut ecdysis = Ecdysis {
+            registry: ListenerRegistry::new(),
+            ready_notifier: None,
+            pid_file: None,
+            child: true,
+            pending_handovers: HashSet::from([1]),
+            next_handover_gate: 2,
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ecdysis
+                .complete_handover(
+                    HandoverCommit {
+                        readiness_gate: Some(1),
+                    },
+                    || panic!("activation failed"),
+                )
+                .unwrap();
+        }));
+        assert!(result.is_err());
+        assert_eq!(ecdysis.pending_handovers, HashSet::from([1]));
+        assert_eq!(
+            ecdysis.ready().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }

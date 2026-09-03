@@ -1407,6 +1407,7 @@ mod tests {
     #[test]
     fn skips_requests_and_frames_from_a_failed_generation() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
+        let (mut stale_reader, stale_writer) = UnixStream::pair().unwrap();
         let mut stale_request = Vec::new();
         stale_request.extend_from_slice(&SupportedVersions::exact(1).min.to_be_bytes());
         stale_request.extend_from_slice(&SupportedVersions::exact(1).max.to_be_bytes());
@@ -1416,6 +1417,13 @@ mod tests {
         child_socket
             .send(&encode_frame(MessageKind::Prepared, 1, 1, &[], 0))
             .unwrap();
+        send_encoded(
+            child_socket.as_raw_fd(),
+            &encode_frame(MessageKind::Item, 1, 1, &[0, 0], 1),
+            &[stale_writer.as_fd()],
+        )
+        .unwrap();
+        drop(stale_writer);
 
         let mut parent = HandoverPeer::new(parent_socket).unwrap();
         let mut child = HandoverPeer::new(child_socket).unwrap();
@@ -1430,6 +1438,8 @@ mod tests {
         let outgoing = request.begin(2).unwrap();
         outgoing.finish().unwrap().wait().unwrap().commit().unwrap();
         child_thread.join().unwrap();
+        let mut byte = [0];
+        assert_eq!(stale_reader.read(&mut byte).unwrap(), 0);
     }
 
     #[test]

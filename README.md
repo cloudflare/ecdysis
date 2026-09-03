@@ -22,7 +22,7 @@ There are [many ways to implement graceful upgrades](https://blog.cloudflare.com
 
 * No old code keeps running after a successful upgrade
 * The new process has a grace period for performing initialisation
-* Crashing during initialisation is OK
+* Crashing during initialisation before handover commit is OK
 * Only a single upgrade is ever run in parallel
 
 ## Features
@@ -51,7 +51,9 @@ parent and an endpoint for its next child:
 ```rust,no_run
 use ecdysis::{handover::SupportedVersions, Ecdysis};
 
-# fn activate(_items: Vec<ecdysis::handover::HandoverItem>) {}
+# struct DormantState(Vec<ecdysis::handover::HandoverItem>);
+# fn reconstruct(items: Vec<ecdysis::handover::HandoverItem>) -> Result<DormantState, Box<dyn std::error::Error>> { Ok(DormantState(items)) }
+# fn activate(_state: DormantState) {}
 # fn run() -> Result<(), Box<dyn std::error::Error>> {
 let mut ecdysis = Ecdysis::new();
 let (from_parent, to_child) = ecdysis.handover_channel("active-connections".into())?;
@@ -63,9 +65,10 @@ if let Some(mut from_parent) = from_parent {
         items.push(item);
     }
 
-    // Reconstruct, but do not poll, the application state before this point.
+    // Complete all fallible work, but do not poll the reconstructed state.
+    let dormant = reconstruct(items)?;
     let commit = incoming.prepare()?.wait_for_commit()?;
-    ecdysis.complete_handover(commit, || activate(items))?;
+    ecdysis.complete_handover(commit, || activate(dormant))?;
 }
 
 ecdysis.ready()?;
