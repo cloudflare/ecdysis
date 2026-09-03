@@ -11,10 +11,13 @@ pub(crate) const ENV_PIPE_FDS: &str = "ECDYSIS_RUST_PIPE_FDS";
 pub(crate) const UPGRADE_TRUE_VAL: &str = "yes";
 
 // TODO: Don't die here
-pub(crate) fn set_cloexec(fd: i32) {
-    let flags = fcntl(fd, FcntlArg::F_GETFD).expect("Failed to get info for file descriptor");
-    let flags = FdFlag::from_bits(flags).expect("unknown fd flags") | FdFlag::FD_CLOEXEC;
-    let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
+pub(crate) fn set_cloexec(fd: i32) -> io::Result<()> {
+    let flags =
+        fcntl(fd, FcntlArg::F_GETFD).map_err(|errno| io::Error::from_raw_os_error(errno as i32))?;
+    let flags = FdFlag::from_bits_truncate(flags) | FdFlag::FD_CLOEXEC;
+    fcntl(fd, FcntlArg::F_SETFD(flags))
+        .map(|_| ())
+        .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
 }
 
 pub(crate) fn unset_cloexec(fd: i32) {

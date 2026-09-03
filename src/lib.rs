@@ -4,6 +4,7 @@
 pub mod tokio_ecdysis;
 
 mod executioner;
+pub mod handover;
 mod inheriter;
 mod listener;
 mod registry;
@@ -30,6 +31,7 @@ use socket2::Socket;
 pub use {crate::seqpacket::UnixSeqpacketListenerStream, tokio_seqpacket::UnixSeqpacketListener};
 
 use executioner::{upgrade, UpgradeFinished};
+use handover::HandoverPeer;
 use inheriter::{init_child, InheritError};
 use registry::{ListenerRegistry, SockInfo};
 
@@ -334,5 +336,17 @@ impl Ecdysis {
             unix_datagram_to_parent_option,
             unix_datagram_to_child_result,
         )
+    }
+
+    /// Create a private transactional handover channel between adjacent process generations.
+    ///
+    /// The first element communicates with this process's parent and is present only in an
+    /// upgraded child. The second communicates with a future child spawned by this process.
+    pub fn handover_channel(
+        &self,
+        name: String,
+    ) -> (Option<HandoverPeer>, io::Result<HandoverPeer>) {
+        let (parent, child) = self.unix_datagram_pair(name);
+        (parent.map(HandoverPeer::new), child.map(HandoverPeer::new))
     }
 }
