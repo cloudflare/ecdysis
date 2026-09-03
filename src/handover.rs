@@ -274,7 +274,7 @@ impl HandoverPeer {
 
     /// Request application state from the immediately previous process generation.
     pub fn request(
-        &self,
+        &mut self,
         versions: SupportedVersions,
     ) -> Result<IncomingHandover<'_>, HandoverError> {
         let transaction_id = next_transaction_id();
@@ -292,7 +292,7 @@ impl HandoverPeer {
     }
 
     /// Wait for a handover request from the immediately following process generation.
-    pub fn receive_request(&self) -> Result<HandoverRequest<'_>, HandoverError> {
+    pub fn receive_request(&mut self) -> Result<HandoverRequest<'_>, HandoverError> {
         let frame = self.recv_frame()?;
         require_control_frame(&frame, MessageKind::Request)?;
         if frame.payload.len() != 4 {
@@ -338,7 +338,7 @@ impl HandoverPeer {
 
 /// A child generation's request observed by its parent.
 pub struct HandoverRequest<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     versions: SupportedVersions,
 }
@@ -369,7 +369,7 @@ impl<'a> HandoverRequest<'a> {
 
 /// A parent-side transaction that may send one or more state/descriptor items.
 pub struct OutgoingHandover<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     application_version: u16,
 }
@@ -439,7 +439,7 @@ impl<'a> OutgoingHandover<'a> {
 /// A completed parent offer waiting for the child to reconstruct dormant state.
 #[must_use = "the handover must be committed or aborted"]
 pub struct AwaitingPrepared<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     application_version: u16,
 }
@@ -472,7 +472,7 @@ impl<'a> AwaitingPrepared<'a> {
 /// A parent-side handover that the child has reconstructed but not activated.
 #[must_use = "the handover must be committed or aborted"]
 pub struct PreparedHandover<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     application_version: u16,
 }
@@ -497,7 +497,7 @@ impl PreparedHandover<'_> {
 
 /// A child-side transaction receiving state from its parent.
 pub struct IncomingHandover<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     versions: SupportedVersions,
     application_version: Option<u16>,
@@ -581,7 +581,7 @@ impl<'a> IncomingHandover<'a> {
 /// Child-side dormant state waiting for the parent to commit or abort.
 #[must_use = "the child must wait for commit before activating handed-over state"]
 pub struct PreparedIncoming<'a> {
-    peer: &'a HandoverPeer,
+    peer: &'a mut HandoverPeer,
     transaction_id: u64,
     application_version: u16,
 }
@@ -930,8 +930,8 @@ mod tests {
     #[test]
     fn transfers_multiple_items_and_commits() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let parent = HandoverPeer::new(parent_socket);
-        let child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket);
+        let mut child = HandoverPeer::new(child_socket);
         let (mut stream, transferred_stream) = UnixStream::pair().unwrap();
 
         let child_thread = thread::spawn(move || {
@@ -971,8 +971,8 @@ mod tests {
     #[test]
     fn abort_returns_descriptors_to_parent_control() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let parent = HandoverPeer::new(parent_socket);
-        let child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket);
+        let mut child = HandoverPeer::new(child_socket);
         let (_stream, transferred_stream) = UnixStream::pair().unwrap();
 
         let child_thread = thread::spawn(move || {
@@ -1022,8 +1022,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_application_version_without_sending() {
         let (parent_socket, child_socket) = UnixDatagram::pair().unwrap();
-        let parent = HandoverPeer::new(parent_socket);
-        let child = HandoverPeer::new(child_socket);
+        let mut parent = HandoverPeer::new(parent_socket);
+        let mut child = HandoverPeer::new(child_socket);
 
         let child_thread = thread::spawn(move || {
             let _incoming = child
@@ -1042,9 +1042,9 @@ mod tests {
     fn enforces_item_limits() {
         let (socket, _peer) = UnixDatagram::pair().unwrap();
         let limits = HandoverLimits::new(8, 1, 3).unwrap();
-        let peer = HandoverPeer::with_limits(socket, limits);
+        let mut peer = HandoverPeer::with_limits(socket, limits);
         let mut outgoing = OutgoingHandover {
-            peer: &peer,
+            peer: &mut peer,
             transaction_id: 1,
             application_version: 1,
         };
